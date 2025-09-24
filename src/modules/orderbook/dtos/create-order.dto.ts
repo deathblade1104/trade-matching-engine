@@ -1,5 +1,13 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsEnum, IsNumber, IsPositive } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import {
+  IsEnum,
+  IsInt,
+  IsNumber,
+  IsOptional,
+  IsPositive,
+  Max,
+  Min,
+} from 'class-validator';
 import { OrderSide } from '../enums/order.enum';
 
 export class CreateOrderDto {
@@ -31,4 +39,18 @@ export class CreateOrderDto {
   @IsNumber()
   @IsPositive()
   quantity: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Max number of days to keep the order active before expiry (1–60). Defaults to 60 when omitted.',
+    type: 'integer',
+    example: 10,
+    minimum: 1,
+    maximum: 60,
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(60)
+  validity_days?: number = 60;
 }

@@ -2,7 +2,6 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, Repository } from 'typeorm';
 import { GenericCrudRepository } from '../../../database/postgres/repository/generic-crud.repository';
-import { Order } from '../entities/order.entity';
 import { Trade } from '../entities/trades.entity';
 
 @Injectable()
@@ -17,16 +16,16 @@ export class TradesHelper {
   }
 
   async createTrade(
-    buyOrder: Order,
-    sellOrder: Order,
+    buyOrderId: number,
+    sellOrderId: number,
     price: string,
     quantity: string,
     manager?: EntityManager,
   ): Promise<Trade> {
     return await this.tradeRepository.create(
       {
-        buy_order: buyOrder,
-        sell_order: sellOrder,
+        buy_order_id: buyOrderId,
+        sell_order_id: sellOrderId,
         price,
         quantity,
       },
@@ -35,7 +34,12 @@ export class TradesHelper {
   }
 
   async createMany(
-    trades: Partial<Trade>[],
+    trades: {
+      buy_order_id: number;
+      sell_order_id: number;
+      price: string;
+      quantity: string;
+    }[],
     manager?: EntityManager,
   ): Promise<Trade[]> {
     return await this.tradeRepository.createMany(trades, manager);
@@ -50,7 +54,7 @@ export class TradesHelper {
 
   async findTradesForOrder(orderId: number): Promise<Trade[]> {
     return await this.tradeRepository.findAll({
-      where: [{ buy_order: { id: orderId } }, { sell_order: { id: orderId } }],
+      where: [{ buy_order_id: orderId }, { sell_order_id: orderId }],
       relations: ['buy_order', 'sell_order'],
       order: { created_at: 'DESC' },
     });

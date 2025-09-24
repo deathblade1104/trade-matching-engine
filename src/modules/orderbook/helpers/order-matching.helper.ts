@@ -1,12 +1,13 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
+import { OrderStatusHistory } from '../entities/order-status-history.entity';
 import { Order } from '../entities/order.entity';
-import { Trade } from '../entities/trades.entity';
-import { OrderSide, OrderStatus } from '../enums/order.enum';
+import { OrderSide, OrderStatus, OrderStatusActor } from '../enums/order.enum';
+import { OrderStatusHistoryHelper } from './order-status-history.helper';
 import { OrderHelper } from './order.helper';
 import { TradesHelper } from './trades.helper';
 
-const MAX_COUNTER_ORDERS = 200; // 👈 cap per chunk
+const MAX_COUNTER_ORDERS = 200;
 
 @Injectable()
 export class OrderMatchingHelper {
@@ -16,6 +17,7 @@ export class OrderMatchingHelper {
     private readonly dataSource: DataSource,
     private readonly orderHelper: OrderHelper,
     private readonly tradesHelper: TradesHelper,
+    private readonly statusHistoryHelper: OrderStatusHistoryHelper,
   ) {}
 
   /**
@@ -26,7 +28,6 @@ export class OrderMatchingHelper {
     this.logger.debug(`Matching order [id=${orderId}]`);
 
     const order = await this.orderHelper.findById(orderId);
-
     if (!order) {
       throw new NotFoundException(`Order ${orderId} not found`);
     }
@@ -49,10 +50,6 @@ export class OrderMatchingHelper {
         processedCount = chunkResult.processedCount;
       });
 
-      // stop if:
-      // 1. order filled, or
-      // 2. price check failed (processMatchingChunk will exit early), or
-      // 3. processed too many in this run
       if (
         parseFloat(order.remaining) <= 0 ||
         processedCount < MAX_COUNTER_ORDERS
@@ -84,7 +81,16 @@ export class OrderMatchingHelper {
     );
 
     const ordersToUpdate: Order[] = [order];
-    const tradesToInsert: Partial<Trade>[] = [];
+
+    const tradesToInsert: {
+      buy_order_id: number;
+      sell_order_id: number;
+      price: string;
+      quantity: string;
+    }[] = [];
+
+    const statusLogs: Partial<OrderStatusHistory>[] = [];
+
     let processedCount = 0;
 
     for (const counterOrder of counterOrders) {
@@ -93,11 +99,29 @@ export class OrderMatchingHelper {
 
       const { tradeQty, tradePrice } = this.calculateTrade(order, counterOrder);
 
+      const prevOrderStatus = order.status;
+      const prevCounterStatus = counterOrder.status;
+
       this.applyTradeEffects(order, counterOrder, tradeQty);
 
       ordersToUpdate.push(counterOrder);
       tradesToInsert.push(
         this.buildTrade(order, counterOrder, tradePrice, tradeQty),
+      );
+
+      // log status changes only if changed
+      this.trackStatusChange(
+        statusLogs,
+        order,
+        prevOrderStatus,
+        OrderStatusActor.SYSTEM,
+      );
+
+      this.trackStatusChange(
+        statusLogs,
+        counterOrder,
+        prevCounterStatus,
+        OrderStatusActor.SYSTEM,
       );
 
       processedCount++;
@@ -107,7 +131,7 @@ export class OrderMatchingHelper {
       );
     }
 
-    await this.flushWrites(ordersToUpdate, tradesToInsert, manager);
+    await this.flushWrites(ordersToUpdate, tradesToInsert, statusLogs, manager);
 
     return { processedCount };
   }
@@ -165,10 +189,17 @@ export class OrderMatchingHelper {
     counterOrder: Order,
     tradePrice: string,
     tradeQty: string,
-  ) {
+  ): {
+    buy_order_id: number;
+    sell_order_id: number;
+    price: string;
+    quantity: string;
+  } {
     return {
-      buy_order: newOrder.side === OrderSide.BUY ? newOrder : counterOrder,
-      sell_order: newOrder.side === OrderSide.SELL ? newOrder : counterOrder,
+      buy_order_id:
+        newOrder.side === OrderSide.BUY ? newOrder.id : counterOrder.id,
+      sell_order_id:
+        newOrder.side === OrderSide.SELL ? newOrder.id : counterOrder.id,
       price: tradePrice,
       quantity: tradeQty,
     };
@@ -176,7 +207,13 @@ export class OrderMatchingHelper {
 
   private async flushWrites(
     ordersToUpdate: Order[],
-    tradesToInsert: Partial<Trade>[],
+    tradesToInsert: {
+      buy_order_id: number;
+      sell_order_id: number;
+      price: string;
+      quantity: string;
+    }[],
+    statusLogs: Partial<OrderStatusHistory>[],
     manager: EntityManager,
   ) {
     if (ordersToUpdate.length > 0) {
@@ -186,5 +223,20 @@ export class OrderMatchingHelper {
     if (tradesToInsert.length > 0) {
       await this.tradesHelper.createMany(tradesToInsert, manager);
     }
+
+    if (statusLogs.length > 0) {
+      await this.statusHistoryHelper.logMany(statusLogs, manager);
+    }
+  }
+
+  private trackStatusChange(
+    logs: Partial<OrderStatusHistory>[],
+    order: Order,
+    prevStatus: OrderStatus,
+    actor: OrderStatusActor,
+  ): void {
+    if (order.status === prevStatus) return;
+    logs.push({ order_id: order.id, status: order.status, actor });
+    return;
   }
 }
