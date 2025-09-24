@@ -1,0 +1,46 @@
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { OrderSide, OrderStatus } from '../enums/order.enum';
+export class OrderResponseDto {
+  @ApiProperty()
+  id: number;
+
+  @ApiProperty({ enum: OrderSide })
+  side: OrderSide;
+
+  @ApiProperty()
+  price: string;
+
+  @ApiProperty()
+  quantity: string;
+
+  @ApiProperty()
+  remaining: string;
+
+  @ApiProperty({ enum: OrderStatus })
+  status: OrderStatus;
+
+  @ApiProperty()
+  created_at: string;
+
+  @ApiProperty()
+  updated_at: string;
+
+  @ApiPropertyOptional()
+  user_id?: number;
+}
+
+export class OrderbookLevelDto {
+  @ApiProperty()
+  price: string;
+
+  @ApiProperty()
+  remaining: number;
+}
+
+export class OrderbookResponseDto {
+  @ApiProperty({ type: () => [OrderbookLevelDto] })
+  buys: OrderbookLevelDto[];
+
+  @ApiProperty({ type: () => [OrderbookLevelDto] })
+  sells: OrderbookLevelDto[];
+}
