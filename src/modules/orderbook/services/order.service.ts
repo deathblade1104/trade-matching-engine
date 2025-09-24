@@ -4,7 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 import {
   PaginatedResponseDto,
   PaginationQueryDto,
@@ -15,15 +15,20 @@ import { CreateOrderDto } from '../dtos/create-order.dto';
 import {
   OrderbookLevelDto,
   OrderResponseDto,
+  OrderStatusHistoryResponseDto,
 } from '../dtos/order-response.dto';
+import { OrderStatusHistory } from '../entities/order-status-history.entity';
 import { Order } from '../entities/order.entity';
 import {
   OrderJobNameEnum,
   OrderStatus,
+  OrderStatusActor,
   OrderTaskQueueEnum,
 } from '../enums/order.enum';
+import { OrderStatusHistoryHelper } from '../helpers/order-status-history.helper';
 import { OrderHelper } from '../helpers/order.helper';
 import { JobOptionsMap } from '../order.constants';
+import { IOrderExpiryData } from '../processors/order-expiry.processor';
 import { IOrderMatchingData } from '../processors/order-matching.processor';
 
 @Injectable()
@@ -34,9 +39,40 @@ export class OrdersService {
     @InjectRepository(Order)
     private readonly orderRepo: Repository<Order>,
     private readonly orderHelper: OrderHelper,
+    private readonly orderStatusHistoryHelper: OrderStatusHistoryHelper,
     private readonly bullQueueService: BullQueueService,
+    private readonly dataSource: DataSource,
   ) {
     this.orderRepository = new GenericCrudRepository(orderRepo, Order.name);
+  }
+
+  async createOrderTransactional(
+    dto: CreateOrderDto,
+    userId: number,
+  ): Promise<Order> {
+    return await this.dataSource.transaction(
+      async (manager): Promise<Order> => {
+        const newOrder = await this.orderHelper.createOrder(
+          {
+            side: dto.side,
+            price: dto.price.toString(),
+            quantity: dto.quantity.toString(),
+            validity_days: dto.validity_days,
+            user_id: userId,
+          },
+          manager,
+        );
+        const newStatusHistory = await this.orderStatusHistoryHelper.logStatus(
+          {
+            order_id: newOrder.id,
+            status: newOrder.status,
+            actor: OrderStatusActor.USER,
+          },
+          manager,
+        );
+        return { ...newOrder, status_history: [newStatusHistory] };
+      },
+    );
   }
 
   /**
@@ -46,19 +82,27 @@ export class OrdersService {
     dto: CreateOrderDto,
     userId: number,
   ): Promise<OrderResponseDto> {
-    const newOrder = await this.orderHelper.createOrder(
-      dto.side,
-      dto.price.toString(),
-      dto.quantity.toString(),
-      userId,
-    );
+    const newOrder = await this.createOrderTransactional(dto, userId);
+    const scheduleTimeForExpiry = newOrder.validity_days * 24 * 60 * 60 * 1000;
 
-    await this.bullQueueService.addJob<IOrderMatchingData>(
-      OrderTaskQueueEnum.PROCESS_ORDER,
-      OrderJobNameEnum.PROCESS_ORDER,
-      { order_id: newOrder.id, reprocess_count: 0 },
-      JobOptionsMap[OrderJobNameEnum.PROCESS_ORDER],
-    );
+    //add matching and expiry jobs for orders in queue
+    await Promise.all([
+      this.bullQueueService.addJob<IOrderMatchingData>(
+        OrderTaskQueueEnum.PROCESS_ORDER,
+        OrderJobNameEnum.PROCESS_ORDER,
+        { order_id: newOrder.id, reprocess_count: 0 },
+        JobOptionsMap[OrderJobNameEnum.PROCESS_ORDER],
+      ),
+      this.bullQueueService.addJob<IOrderExpiryData>(
+        OrderTaskQueueEnum.EXPIRE_ORDER,
+        OrderJobNameEnum.EXPIRE_ORDER,
+        { order_id: newOrder.id },
+        {
+          ...JobOptionsMap[OrderJobNameEnum.EXPIRE_ORDER],
+          delay: scheduleTimeForExpiry,
+        },
+      ),
+    ]);
 
     return this.toOrderResponseDto(newOrder);
   }
@@ -71,14 +115,14 @@ export class OrdersService {
     userId: number,
   ): Promise<OrderResponseDto> {
     const order = await this.orderHelper.findById(orderId, {
-      relations: ['user'],
+      relations: ['status_history'],
     });
 
     if (!order) {
       throw new NotFoundException('Order not found');
     }
 
-    if (order.user.id !== userId) {
+    if (order.user_id !== userId) {
       throw new ForbiddenException('You are not allowed to access this order');
     }
 
@@ -159,7 +203,7 @@ export class OrdersService {
   }
   private toOrderResponseDto(order: Order): OrderResponseDto {
     // Segregate user data from order data using spread operator
-    const { user, ...orderData } = order;
+    const { status_history: statusHistoryArr, ...orderData } = order;
 
     // Return only order data with formatted timestamp
     const resp: OrderResponseDto = {
@@ -168,10 +212,25 @@ export class OrdersService {
       updated_at: order.updated_at.toISOString(),
     };
 
-    if (user && user.id) {
-      resp.user_id = user.id;
+    if (Array.isArray(statusHistoryArr) && statusHistoryArr.length > 0) {
+      statusHistoryArr.sort(
+        (a, b) => b.created_at.getTime() - a.created_at.getTime(),
+      );
+      resp.status_history = statusHistoryArr.map((history) =>
+        this.toOrderStatusHistoryResponseDto(history),
+      );
     }
 
     return resp;
+  }
+
+  private toOrderStatusHistoryResponseDto(
+    orderStatusHistory: OrderStatusHistory,
+  ): OrderStatusHistoryResponseDto {
+    return {
+      status: orderStatusHistory.status,
+      actor: orderStatusHistory.actor,
+      created_at: orderStatusHistory.created_at.toISOString(),
+    };
   }
 }

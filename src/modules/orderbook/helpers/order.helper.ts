@@ -2,7 +2,6 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, FindOneOptions, In, Repository } from 'typeorm';
 import { GenericCrudRepository } from '../../../database/postgres/repository/generic-crud.repository';
-import { User } from '../../user/entities/user.entity';
 import { Order } from '../entities/order.entity';
 import { OrderSide, OrderStatus } from '../enums/order.enum';
 
@@ -18,20 +17,13 @@ export class OrderHelper {
   }
 
   async createOrder(
-    side: OrderSide,
-    price: string,
-    quantity: string,
-    userId: number,
+    orderDto: Partial<Order>,
     manager?: EntityManager,
   ): Promise<Order> {
     return await this.orderRepository.create(
       {
-        side,
-        price,
-        quantity,
-        remaining: quantity,
+        ...orderDto,
         status: OrderStatus.OPEN,
-        user: { id: userId } as Partial<User>,
       },
       manager,
     );
