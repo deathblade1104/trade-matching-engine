@@ -49,12 +49,16 @@ export class OrderbookLevelDto {
 
   @ApiProperty()
   remaining: number;
-}
 
-export class OrderbookResponseDto {
-  @ApiProperty({ type: () => [OrderbookLevelDto] })
-  buys: OrderbookLevelDto[];
+  @ApiProperty()
+  user_name: string;
 
-  @ApiProperty({ type: () => [OrderbookLevelDto] })
-  sells: OrderbookLevelDto[];
+  @ApiProperty()
+  status: OrderStatus;
+
+  @ApiProperty()
+  side: OrderSide;
+
+  @ApiProperty()
+  created_at: string;
 }

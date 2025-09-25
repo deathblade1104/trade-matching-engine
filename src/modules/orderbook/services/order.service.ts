@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -21,6 +22,7 @@ import { OrderStatusHistory } from '../entities/order-status-history.entity';
 import { Order } from '../entities/order.entity';
 import {
   OrderJobNameEnum,
+  OrderSide,
   OrderStatus,
   OrderStatusActor,
   OrderTaskQueueEnum,
@@ -57,6 +59,7 @@ export class OrdersService {
             side: dto.side,
             price: dto.price.toString(),
             quantity: dto.quantity.toString(),
+            remaining: dto.quantity.toString(),
             validity_days: dto.validity_days,
             user_id: userId,
           },
@@ -133,43 +136,56 @@ export class OrdersService {
    * Get current orderbook (active orders only, grouped by price)
    */
   async getOrderbook(
+    orderSide: string,
     pagination: PaginationQueryDto,
   ): Promise<PaginatedResponseDto<OrderbookLevelDto>> {
+    if (!Object.values(OrderSide).includes(orderSide as OrderSide)) {
+      throw new BadRequestException(
+        `side param should be in [${Object.values(OrderSide).join(',')}]. `,
+      );
+    }
+
+    const side = orderSide as OrderSide;
+
     const { page, limit } = pagination;
     const offset = (page - 1) * limit;
-
-    // BUY side
-    const buys = await this.orderRepo
+    const query = this.orderRepository
       .createQueryBuilder('o')
-      .select(['o.price AS price', 'SUM(o.remaining)::float AS total'])
-      .where('o.side = :side', { side: 'BUY' })
-      .andWhere("o.status IN ('OPEN','PARTIAL')")
-      .groupBy('o.price')
-      .orderBy('o.price', 'DESC')
-      .offset(offset)
-      .limit(limit)
-      .getRawMany();
+      .leftJoinAndSelect('o.user', 'u')
+      .select([
+        'o.id AS order_id',
+        'o.price AS price',
+        'o.created_at AS created_at',
+        'o.remaining AS remaining',
+        'o.status AS status',
+        'u.name AS user_name',
+      ])
+      .where('o.side = :side', { side })
+      .andWhere("o.status IN ('OPEN','PARTIAL')");
 
-    // SELL side
-    const sells = await this.orderRepo
-      .createQueryBuilder('o')
-      .select(['o.price AS price', 'SUM(o.remaining)::float AS total'])
-      .where('o.side = :side', { side: 'SELL' })
-      .andWhere("o.status IN ('OPEN','PARTIAL')")
-      .groupBy('o.price')
-      .orderBy('o.price', 'ASC')
-      .offset(offset)
-      .limit(limit)
-      .getRawMany();
+    if (side === OrderSide.BUY) {
+      query.orderBy('o.price', 'DESC');
+    } else {
+      query.orderBy('o.price', 'ASC');
+    }
+
+    const orders = (await query.offset(offset).limit(limit).getRawMany()) || [];
 
     return {
-      total: buys.length + sells.length, // crude count
+      total: orders.length,
       page,
       limit,
-      items: [
-        ...buys.map((b) => ({ price: b.price, remaining: b.total })),
-        ...sells.map((s) => ({ price: s.price, remaining: s.total })),
-      ],
+      items:
+        orders.length == 0
+          ? []
+          : orders.map((o) => ({
+              price: o.price,
+              remaining: parseFloat(o.remaining),
+              status: o.status,
+              user_name: o.user_name,
+              created_at: o.created_at.toISOString(),
+              side,
+            })),
     };
   }
 

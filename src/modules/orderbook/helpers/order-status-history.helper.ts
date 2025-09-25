@@ -39,13 +39,6 @@ export class OrderStatusHistoryHelper {
     logs: Partial<OrderStatusHistory>[],
     manager?: EntityManager,
   ): Promise<OrderStatusHistory[]> {
-    return await this.repository.createMany(
-      logs.map((l) => ({
-        order: l.order,
-        status: l.status,
-        actor: l.actor,
-      })),
-      manager,
-    );
+    return await this.repository.createMany(logs, manager);
   }
 }

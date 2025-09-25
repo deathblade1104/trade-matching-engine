@@ -84,7 +84,9 @@ export class OrdersController {
               enum: ['OPEN', 'PARTIAL', 'FILLED'],
               example: 'OPEN',
             },
+            validity_days: { type: 'number', example: 60 },
             created_at: { type: 'string', format: 'date-time' },
+            updated_at: { type: 'string', format: 'date-time' },
           },
         },
       },
@@ -159,7 +161,32 @@ export class OrdersController {
               enum: ['OPEN', 'PARTIAL', 'FILLED'],
               example: 'PARTIAL',
             },
+            validity_days: { type: 'number', example: 60 },
             created_at: { type: 'string', format: 'date-time' },
+            updated_at: { type: 'string', format: 'date-time' },
+            status_history: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  status: {
+                    type: 'string',
+                    enum: ['OPEN', 'PARTIAL', 'FILLED'],
+                    example: 'OPEN',
+                  },
+                  actor: {
+                    type: 'string',
+                    enum: ['USER', 'SYSTEM'],
+                    example: 'USER',
+                  },
+                  created_at: {
+                    type: 'string',
+                    format: 'date-time',
+                    example: '2024-01-15T10:30:00.000Z',
+                  },
+                },
+              },
+            },
           },
         },
       },
@@ -203,69 +230,6 @@ export class OrdersController {
       data,
     };
   }
-
-  @Get('/book/all')
-  @HttpCode(200)
-  @ApiOperation({
-    summary: 'Get current orderbook',
-    description:
-      'Retrieve the current state of the orderbook showing all active buy and sell orders grouped by price level.',
-  })
-  @ApiQuery({
-    name: 'page',
-    type: 'number',
-    required: false,
-    description: 'Page number for pagination',
-    example: 1,
-  })
-  @ApiQuery({
-    name: 'limit',
-    type: 'number',
-    required: false,
-    description: 'Number of items per page',
-    example: 10,
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Orderbook retrieved successfully',
-    schema: {
-      type: 'object',
-      properties: {
-        message: { type: 'string', example: 'Orderbook fetched successfully' },
-        data: {
-          type: 'object',
-          properties: {
-            total: { type: 'number', example: 25 },
-            page: { type: 'number', example: 1 },
-            limit: { type: 'number', example: 10 },
-            items: {
-              type: 'array',
-              items: {
-                type: 'object',
-                properties: {
-                  price: { type: 'string', example: '100.50' },
-                  remaining: { type: 'number', example: 15.75 },
-                },
-              },
-              example: [
-                { price: '100.50', remaining: 15.75 },
-                { price: '100.25', remaining: 8.5 },
-                { price: '99.75', remaining: 12.0 },
-              ],
-            },
-          },
-        },
-      },
-    },
-  })
-  async getOrderbook(@Query() query: PaginationQueryDto) {
-    const data = await this.ordersService.getOrderbook(query);
-    return {
-      message: 'Orderbook fetched successfully',
-      data,
-    };
-  }
-
   @Get()
   @HttpCode(200)
   @ApiOperation({
@@ -319,7 +283,9 @@ export class OrdersController {
                     enum: ['OPEN', 'PARTIAL', 'FILLED'],
                     example: 'PARTIAL',
                   },
+                  validity_days: { type: 'number', example: 60 },
                   created_at: { type: 'string', format: 'date-time' },
+                  updated_at: { type: 'string', format: 'date-time' },
                 },
               },
             },
@@ -328,7 +294,7 @@ export class OrdersController {
       },
     },
   })
-  async getMyOrders(
+  async getOrdersPerUser(
     @Query() query: PaginationQueryDto,
     @Req() req: CustomExpressRequest,
   ) {

@@ -4,6 +4,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { RedisCacheModule } from '../../database/redis/redis-cache.module';
 import { BullMQModule } from '../../providers/infra/bullmq/bullmq.module';
 import { OrdersController } from './controllers/order.controller';
+import { OrderBookController } from './controllers/orderbook.controller';
 import { TradesController } from './controllers/trades.controller';
 import { OrderStatusHistory } from './entities/order-status-history.entity';
 import { Order } from './entities/order.entity';
@@ -35,7 +36,7 @@ import { TradesService } from './services/trade.service';
       },
     ]),
   ],
-  controllers: [OrdersController, TradesController],
+  controllers: [OrdersController, OrderBookController, TradesController],
   providers: [
     OrdersService,
     OrderHelper,
