@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import {
   PaginatedResponseDto,
   PaginationQueryDto,
@@ -23,7 +23,6 @@ import { Order } from '../entities/order.entity';
 import {
   OrderJobNameEnum,
   OrderSide,
-  OrderStatus,
   OrderStatusActor,
   OrderTaskQueueEnum,
 } from '../enums/order.enum';
@@ -200,7 +199,6 @@ export class OrdersService {
       {
         where: {
           user: { id: userId },
-          status: In([OrderStatus.OPEN, OrderStatus.PARTIAL]),
         },
         order: {
           created_at: 'DESC',
