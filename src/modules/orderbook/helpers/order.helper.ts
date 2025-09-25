@@ -47,7 +47,7 @@ export class OrderHelper {
     limit: number,
     offset: number,
   ): Promise<Order[]> {
-    return await this.orderRepository.findAll({
+    const orders = await this.orderRepository.findAll({
       where: { side, status: In([OrderStatus.OPEN, OrderStatus.PARTIAL]) },
       order: {
         price: side === OrderSide.BUY ? 'DESC' : 'ASC',
@@ -56,6 +56,7 @@ export class OrderHelper {
       skip: offset,
       take: limit,
     });
+    return orders;
   }
 
   async saveMany(orders: Order[], manager?: EntityManager): Promise<Order[]> {

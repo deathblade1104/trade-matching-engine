@@ -31,7 +31,7 @@ export class TradesService {
         { buy_order: { user: { id: userId } } },
         { sell_order: { user: { id: userId } } },
       ],
-      relations: ['buy_order', 'sell_order'],
+      // relations: ['buy_order', 'sell_order'],
       order: { created_at: 'DESC' },
       skip,
       take: limit,

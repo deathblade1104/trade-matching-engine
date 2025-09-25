@@ -2,6 +2,131 @@
 
 A sophisticated **NestJS-based trade matching engine** that simulates an orderbook where users can place buy and sell orders. The system automatically matches trades and persists all data in PostgreSQL with Redis caching and queue-based processing.
 
+## 🧠 Core Matching Algorithm
+
+The system implements a **sophisticated price-time priority matching engine** with the following characteristics:
+
+### Algorithm Overview
+- **Price-Time Priority**: Orders are matched by price first, then by time (FIFO)
+- **Chunked Processing**: Processes orders in bounded batches (max 200 per chunk) to prevent runaway transactions
+- **Partial Fills**: Supports partial order execution with automatic status updates
+- **Transaction Safety**: All matching operations run within database transactions for ACID compliance
+- **Retry Logic**: Automatic retry for partially filled orders via BullMQ queues
+
+### Matching Process
+1. **Order Placement**: New orders are persisted and enqueued for matching
+2. **Counter Order Discovery**: System finds matching orders on the opposite side
+3. **Price Validation**: Ensures buy orders match with sell orders at compatible prices
+4. **Trade Execution**: Calculates trade quantity and price, updates order statuses
+5. **Status Tracking**: Logs all status changes with actor information (USER/SYSTEM)
+6. **Batch Processing**: Continues until order is fully filled or no more matches found
+
+### Price Matching Rules
+- **Buy Orders**: Match with sell orders where `buy_price >= sell_price`
+- **Sell Orders**: Match with buy orders where `sell_price <= buy_price`
+- **Trade Price**: Uses the price of the existing order (price-time priority)
+
+## 📈 Scalability: How and Why This Scales Well
+
+This design is intentionally production-leaning and horizontally scalable:
+
+- **Stateless API layer**: The HTTP/API tier does not hold state; user sessions are JWT-based. You can scale out API instances behind a load balancer without sticky sessions.
+- **Asynchronous processing via queues**: Matching and expiry run as background jobs (BullMQ). This decouples write-heavy order placement from matching, smoothing spikes. Workers can be scaled independently of the API.
+- **Separation of concerns**: API (ingress), matching engine (domain logic), persistence (Postgres), and cache/queues (Redis) are cleanly separated, enabling targeted scaling and operational ownership.
+- **Efficient data access**: Purposeful indexing on `(side, status, price, created_at)` improves orderbook scans; aggregated orderbook uses SQL grouping at the DB-level for performance.
+- **Chunked matching**: Matching processes counter orders in bounded chunks (max 200 per batch), preventing runaway transactions and keeping latency predictable under load.
+- **Idempotent, transactional writes**: Matching and expiry run in DB transactions to ensure atomicity and consistency; retries won't double-apply state.
+- **Backpressure and retries**: BullMQ default job options provide exponential backoff and capped retries, protecting downstream systems and allowing graceful recovery.
+- **Caching and TTLs**: Redis-based token blacklist and cache hooks allow offloading hot paths and reducing DB reads when needed.
+
+Together, these properties allow you to scale each dimension (API replicas, worker count, DB resources) based on bottlenecks observed in production metrics.
+
+## 🗄️ Database Schema & Entity Relationships
+
+### Core Entities
+
+#### 1. **User Entity**
+```typescript
+User {
+  id: number (Primary Key)
+  name: string
+  email: string (Unique Index)
+  password_hash: string
+  created_at: timestamp
+  updated_at: timestamp
+}
+```
+
+#### 2. **Order Entity**
+```typescript
+Order {
+  id: number (Primary Key)
+  user_id: number (Foreign Key → User.id)
+  side: 'BUY' | 'SELL'
+  price: string (NUMERIC 18,8)
+  quantity: string (NUMERIC 18,8)
+  remaining: string (NUMERIC 18,8)
+  status: 'OPEN' | 'PARTIAL' | 'FILLED' | 'EXPIRED'
+  validity_days: number (default: 60)
+  created_at: timestamp
+  updated_at: timestamp
+}
+```
+
+#### 3. **Trade Entity**
+```typescript
+Trade {
+  id: number (Primary Key)
+  buy_order_id: number (Foreign Key → Order.id)
+  sell_order_id: number (Foreign Key → Order.id)
+  price: string (NUMERIC 18,8)
+  quantity: string (NUMERIC 18,8)
+  created_at: timestamp
+}
+```
+
+#### 4. **Order Status History Entity**
+```typescript
+OrderStatusHistory {
+  id: number (Primary Key)
+  order_id: number (Foreign Key → Order.id, CASCADE DELETE)
+  status: 'OPEN' | 'PARTIAL' | 'FILLED' | 'EXPIRED'
+  actor: 'USER' | 'SYSTEM'
+  created_at: timestamp
+}
+```
+
+### Entity Relationships
+
+```
+User (1) ──────────── (N) Order
+ │                        │
+ │                        │
+ │                        ├── (1) ─── (N) OrderStatusHistory
+ │                        │
+ │                        └── (1) ─── (N) Trade (as buy_order)
+ │                                     │
+ │                                     └── (1) ─── (N) Trade (as sell_order)
+ │
+ └── (1) ─── (N) Trade (as buyer via orders)
+```
+
+### Key Relationships Explained
+
+1. **User → Orders**: One user can have many orders (One-to-Many)
+2. **Order → OrderStatusHistory**: One order can have many status changes (One-to-Many)
+3. **Order → Trades**: One order can participate in many trades as either buyer or seller (One-to-Many)
+4. **Trade → Orders**: Each trade references exactly two orders (buy_order and sell_order)
+
+### Database Indexes
+
+- **Users**: `uq_users_email` (unique index on email)
+- **Orders**:
+  - `idx_side_status_price_createdat` (composite index for efficient orderbook queries)
+  - `idx_user_id` (index for user-specific order queries)
+- **OrderStatusHistory**: Automatic foreign key indexes
+- **Trades**: Automatic foreign key indexes
+
 ## 🚀 Features
 
 ### Core Trading Engine
@@ -151,14 +276,22 @@ Once the application is running, visit:
 - `POST /api/v1/auth/login` - User login
 - `POST /api/v1/auth/logout` - User logout
 
+#### User Management
+- `GET /api/v1/users/info` - Get current user information
+
 #### Orders
 - `POST /api/v1/orders` - Place a new order (buy/sell)
 - `GET /api/v1/orders/:id` - Get order details
-- `GET /api/v1/orders/book` - Get current orderbook
 - `GET /api/v1/orders` - Get user's orders
+
+#### Orderbook
+- `GET /api/v1/orderbook/:side` - Get current orderbook (BUY or SELL)
 
 #### Trades
 - `GET /api/v1/trades` - Get trade history
+
+#### Health
+- `GET /api/v1/health` - System health check
 
 ### Example API Usage
 
@@ -211,8 +344,25 @@ curl -X POST http://localhost:3000/api/v1/orders \
 
 #### 5. Get orderbook
 ```bash
-curl -X GET "http://localhost:3000/api/v1/orders/book?page=1&limit=10" \
+curl -X GET "http://localhost:3000/api/v1/orderbook/BUY?page=1&limit=10" \
   -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+#### 6. Get user information
+```bash
+curl -X GET "http://localhost:3000/api/v1/users/info" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+#### 7. Get trade history
+```bash
+curl -X GET "http://localhost:3000/api/v1/trades?page=1&limit=10" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+#### 8. Get system health
+```bash
+curl -X GET "http://localhost:3000/api/v1/health"
 ```
 
 ## 🔧 Development
@@ -244,13 +394,6 @@ src/
 
 ### Key Components
 
-#### Order Matching Algorithm
-The system implements a sophisticated matching engine with:
-- **Price-Time Priority**: Orders matched by price, then by time
-- **Chunked Processing**: Processes orders for matches in batches (max 200 per chunk)
-- **Partial Fills**: Supports partial order execution
-- **Transaction Safety**: Database transactions ensure data consistency
-- **Retry Logic**: Automatic retry for partially filled orders
 
 #### Queue System
 - **BullMQ Integration**: Asynchronous order processing
@@ -316,12 +459,49 @@ CREATE TABLE order_status_history (
   "quantity": "10.00",
   "remaining": "5.00",
   "status": "PARTIAL",
+  "validity_days": 30,
   "created_at": "2025-01-01T12:34:56.000Z",
   "updated_at": "2025-01-01T12:45:00.000Z",
   "status_history": [
     { "status": "OPEN", "actor": "USER", "created_at": "2025-01-01T12:34:56.000Z" },
     { "status": "PARTIAL", "actor": "SYSTEM", "created_at": "2025-01-01T12:40:00.000Z" }
   ]
+}
+```
+
+- Orderbook (`GET /api/v1/orderbook/:side`):
+```json
+{
+  "message": "Orderbook fetched successfully",
+  "data": {
+    "total": 25,
+    "page": 1,
+    "limit": 10,
+    "items": [
+      {
+        "price": "100.50",
+        "remaining": 15.75,
+        "status": "OPEN",
+        "user_name": "John Doe",
+        "created_at": "2024-01-15T10:30:00.000Z",
+        "side": "BUY"
+      }
+    ]
+  }
+}
+```
+
+- User Info (`GET /api/v1/users/info`):
+```json
+{
+  "message": "User Info fetched successfully",
+  "data": {
+    "id": 1,
+    "name": "John Doe",
+    "email": "john.doe@example.com",
+    "created_at": "2024-01-15T10:30:00.000Z",
+    "updated_at": "2024-01-15T10:30:00.000Z"
+  }
 }
 ```
 
@@ -385,22 +565,6 @@ For support and questions:
 ---
 
 **Built with ❤️ using NestJS, PostgreSQL, and Redis**
-
-
-## 📈 Scalability: How and Why This Scales Well
-
-This design is intentionally production-leaning and horizontally scalable:
-
-- **Stateless API layer**: The HTTP/API tier does not hold state; user sessions are JWT-based. You can scale out API instances behind a load balancer without sticky sessions.
-- **Asynchronous processing via queues**: Matching and expiry run as background jobs (BullMQ). This decouples write-heavy order placement from matching, smoothing spikes. Workers can be scaled independently of the API.
-- **Separation of concerns**: API (ingress), matching engine (domain logic), persistence (Postgres), and cache/queues (Redis) are cleanly separated, enabling targeted scaling and operational ownership.
-- **Efficient data access**: Purposeful indexing on `(side, status, price, created_at)` improves orderbook scans; aggregated orderbook uses SQL grouping at the DB-level for performance.
-- **Chunked matching**: Matching processes counter orders in bounded chunks (max 200 per batch), preventing runaway transactions and keeping latency predictable under load.
-- **Idempotent, transactional writes**: Matching and expiry run in DB transactions to ensure atomicity and consistency; retries won’t double-apply state.
-- **Backpressure and retries**: BullMQ default job options provide exponential backoff and capped retries, protecting downstream systems and allowing graceful recovery.
-- **Caching and TTLs**: Redis-based token blacklist and cache hooks allow offloading hot paths and reducing DB reads when needed.
-
-Together, these properties allow you to scale each dimension (API replicas, worker count, DB resources) based on bottlenecks observed in production metrics.
 
 
 ## ✅ Why This Is A Good Solution To The Assignment
