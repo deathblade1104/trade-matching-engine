@@ -1,0 +1,36 @@
+# Copy this file to application-local.properties and set your values.
+# Run with: mvn spring-boot:run -Dspring-boot.run.profiles=local
+# Or: java -jar target/trade-matching-engine-*.jar --spring.profiles.active=local
+
+# Server
+server.port=3000
+server.servlet.context-path=/api/v1
+
+# Database (PostgreSQL)
+spring.datasource.url=jdbc:postgresql://localhost:5432/trade_matching_engine
+spring.datasource.username=postgres
+spring.datasource.password=your_password_here
+spring.jpa.properties.hibernate.default_schema=public
+
+# Redis
+spring.data.redis.host=localhost
+spring.data.redis.port=6379
+spring.data.redis.password=your_redis_password_here
+
+# App metadata (cache keys, logging)
+app.service-name=trade-matching-service
+app.env=development
+app.redis.ttl=3600
+
+# Matching persistence: control DB write throughput via batching
+# app.matching.persistence.batching-enabled=true
+# app.matching.persistence.flush-interval-ms=200
+# app.matching.persistence.batch-size=100
+
+# JWT
+jwt.secret=your_super_secret_jwt_key_here
+# Token TTL in milliseconds (default 86400000 = 24 hours)
+jwt.expiration-ms=86400000
+
+# Kafka
+spring.kafka.bootstrap-servers=localhost:9092

@@ -1,0 +1,68 @@
+spring:
+  application:
+    name: trade-matching-engine
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:trade_matching_engine}
+    username: ${PG_USER:postgres}
+    password: ${PG_PASSWORD:}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        default_schema: ${DB_SCHEMA:public}
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+    consumer:
+      group-id: trade-matching-group
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "*"
+
+server:
+  port: ${PORT:3000}
+  servlet:
+    context-path: /api/v1
+
+# App metadata for cache keys and logging
+app:
+  service-name: trade-matching-service
+  env: ${NODE_ENV:development}
+  redis:
+    ttl: ${REDIS_TTL:3600}
+
+# JWT
+jwt:
+  secret: ${JWT_SECRET:your_super_secret_jwt_key_here}
+  expiration: ${JWT_EXPIRES_IN:24h}
+
+# Actuator
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: when_authorized
+
+# Springdoc
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
