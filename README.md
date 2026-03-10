@@ -1,602 +1,228 @@
-# Trade Matching Engine
+# Trade Matching Engine (Java)
 
-A sophisticated **NestJS-based trade matching engine** that simulates an orderbook where users can place buy and sell orders. The system automatically matches trades and persists all data in PostgreSQL with Redis caching and queue-based processing.
-
-## 🧠 Core Matching Algorithm
-
-The system implements a **sophisticated price-time priority matching engine** with the following characteristics:
-
-### Algorithm Overview
-- **Price-Time Priority**: Orders are matched by price first, then by time (FIFO)
-- **Chunked Processing**: Processes orders in bounded batches (max 200 per chunk) to prevent runaway transactions
-- **Partial Fills**: Supports partial order execution with automatic status updates
-- **Transaction Safety**: All matching operations run within database transactions for ACID compliance
-- **Retry Logic**: Automatic retry for partially filled orders via BullMQ queues
-
-### Matching Process
-1. **Order Placement**: New orders are persisted and enqueued for matching
-2. **Counter Order Discovery**: System finds matching orders on the opposite side
-3. **Price Validation**: Ensures buy orders match with sell orders at compatible prices
-4. **Trade Execution**: Calculates trade quantity and price, updates order statuses
-5. **Status Tracking**: Logs all status changes with actor information (USER/SYSTEM)
-6. **Batch Processing**: Continues until order is fully filled or no more matches found
-
-### Price Matching Rules
-- **Buy Orders**: Match with sell orders where `buy_price >= sell_price`
-- **Sell Orders**: Match with buy orders where `sell_price <= buy_price`
-- **Trade Price**: Uses the price of the existing order (price-time priority)
-
-## 📈 Scalability: How and Why This Scales Well
-
-This design is intentionally production-leaning and horizontally scalable:
-
-- **Stateless API layer**: The HTTP/API tier does not hold state; user sessions are JWT-based. You can scale out API instances behind a load balancer without sticky sessions.
-- **Asynchronous processing via queues**: Matching and expiry run as background jobs (BullMQ). This decouples write-heavy order placement from matching, smoothing spikes. Workers can be scaled independently of the API.
-- **Separation of concerns**: API (ingress), matching engine (domain logic), persistence (Postgres), and cache/queues (Redis) are cleanly separated, enabling targeted scaling and operational ownership.
-- **Efficient data access**: Purposeful indexing on `(side, status, price, created_at)` improves orderbook scans; aggregated orderbook uses SQL grouping at the DB-level for performance.
-- **Chunked matching**: Matching processes counter orders in bounded chunks (max 200 per batch), preventing runaway transactions and keeping latency predictable under load.
-- **Idempotent, transactional writes**: Matching and expiry run in DB transactions to ensure atomicity and consistency; retries won't double-apply state.
-- **Backpressure and retries**: BullMQ default job options provide exponential backoff and capped retries, protecting downstream systems and allowing graceful recovery.
-- **Caching and TTLs**: Redis-based token blacklist and cache hooks allow offloading hot paths and reducing DB reads when needed.
-
-Together, these properties allow you to scale each dimension (API replicas, worker count, DB resources) based on bottlenecks observed in production metrics.
-
-## 🗄️ Database Schema & Entity Relationships
-
-### Core Entities
-
-#### 1. **User Entity**
-```typescript
-User {
-  id: number (Primary Key)
-  name: string
-  email: string (Unique Index)
-  password_hash: string
-  created_at: timestamp
-  updated_at: timestamp
-}
-```
-
-#### 2. **Order Entity**
-```typescript
-Order {
-  id: number (Primary Key)
-  user_id: number (Foreign Key → User.id)
-  side: 'BUY' | 'SELL'
-  price: string (NUMERIC 18,8)
-  quantity: string (NUMERIC 18,8)
-  remaining: string (NUMERIC 18,8)
-  status: 'OPEN' | 'PARTIAL' | 'FILLED' | 'EXPIRED'
-  validity_days: number (default: 60)
-  created_at: timestamp
-  updated_at: timestamp
-}
-```
-
-#### 3. **Trade Entity**
-```typescript
-Trade {
-  id: number (Primary Key)
-  buy_order_id: number (Foreign Key → Order.id)
-  sell_order_id: number (Foreign Key → Order.id)
-  price: string (NUMERIC 18,8)
-  quantity: string (NUMERIC 18,8)
-  created_at: timestamp
-}
-```
-
-#### 4. **Order Status History Entity**
-```typescript
-OrderStatusHistory {
-  id: number (Primary Key)
-  order_id: number (Foreign Key → Order.id, CASCADE DELETE)
-  status: 'OPEN' | 'PARTIAL' | 'FILLED' | 'EXPIRED'
-  actor: 'USER' | 'SYSTEM'
-  created_at: timestamp
-}
-```
-
-### Entity Relationships
-
-```
-User (1) ──────────── (N) Order
- │                        │
- │                        │
- │                        ├── (1) ─── (N) OrderStatusHistory
- │                        │
- │                        └── (1) ─── (N) Trade (as buy_order)
- │                                     │
- │                                     └── (1) ─── (N) Trade (as sell_order)
- │
- └── (1) ─── (N) Trade (as buyer via orders)
-```
-
-### Key Relationships Explained
-
-1. **User → Orders**: One user can have many orders (One-to-Many)
-2. **Order → OrderStatusHistory**: One order can have many status changes (One-to-Many)
-3. **Order → Trades**: One order can participate in many trades as either buyer or seller (One-to-Many)
-4. **Trade → Orders**: Each trade references exactly two orders (buy_order and sell_order)
-
-### Database Indexes
-
-- **Users**: `uq_users_email` (unique index on email)
-- **Orders**:
-  - `idx_side_status_price_createdat` (composite index for efficient orderbook queries)
-  - `idx_user_id` (index for user-specific order queries)
-- **OrderStatusHistory**: Automatic foreign key indexes
-- **Trades**: Automatic foreign key indexes
-
-## 🚀 Features
-
-### Core Trading Engine
-- **Order Management**: Place buy/sell orders with price and quantity
-- **Automatic Matching**: Sophisticated price-time priority matching algorithm
-- **Trade Execution**: Real-time trade execution with partial fill support
-- **Orderbook Display**: Live orderbook with aggregated price levels
-- **Trade History**: Complete trade history for all users
- - **Order Expiry**: Orders can automatically expire after a validity period
- - **Order Status History**: Every status transition is logged with actor and timestamp
-
-### Advanced Features
-- **User Authentication**: JWT-based authentication with secure password hashing
-- **Queue Processing**: Asynchronous order processing using BullMQ
-- **Redis Caching**: High-performance caching for sessions and data
-- **Database Transactions**: ACID-compliant trade execution
-- **Retry Logic**: Automatic retry for partially filled orders
-- **API Documentation**: Comprehensive Swagger/OpenAPI documentation
-- **Health Monitoring**: System health checks and monitoring
- - **Background Jobs**: Separate queues for order processing and expiry (BullMQ)
-
-## 🏗️ Architecture
-
-### Technology Stack
-- **Framework**: NestJS (Node.js)
-- **Database**: PostgreSQL with TypeORM
-- **Caching**: Redis
-- **Queue System**: BullMQ (Redis-based)
-- **Authentication**: JWT with Passport
-- **API Documentation**: Swagger/OpenAPI
-- **Validation**: class-validator & class-transformer
-
-### System Components
-```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   API Gateway   │    │  Order Service  │    │ Matching Engine │
-│   (NestJS)      │◄──►│   (Service)     │◄──►│   (Helper)      │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-         │                       │                       │
-         ▼                       ▼                       ▼
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Auth Service  │    │   PostgreSQL    │    │   BullMQ Queue  │
-│   (JWT)         │    │   (Database)    │    │   (Processing)  │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-         │                       │                       │
-         ▼                       ▼                       ▼
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Redis Cache   │    │   Trade Service │    │   User Service  │
-│   (Sessions)    │    │   (History)     │    │   (Management)  │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-```
-
-## 📋 Prerequisites
-
-- **Node.js** (v18 or higher)
-- **PostgreSQL** (v12 or higher)
-- **Redis** (v6 or higher)
-- **npm** or **yarn**
-
-## 🛠️ Installation
-
-1. **Clone the repository**
-   ```bash
-   git clone <repository-url>
-   cd trade-matching-engine
-   ```
-
-2. **Install dependencies**
-   ```bash
-   npm install
-   ```
-
-3. **Set up environment variables**
-   ```bash
-   cp env.example .env
-   ```
-
-   Edit `.env` with your configuration:
-   ```env
-   # Server Configuration
-   PORT=3000
-   NODE_ENV=development
-
-   # Database Configuration (PostgreSQL)
-   DB_HOST=localhost
-   DB_PORT=5432
-   DB_NAME=trade_matching_engine
-   DB_SCHEMA=public
-   PG_USER=postgres
-   PG_PASSWORD=your_password_here
-
-   # Redis Configuration
-   REDIS_HOST=localhost
-   REDIS_PORT=6379
-   REDIS_PASSWORD=your_redis_password_here
-   REDIS_TTL=3600
-
-   # JWT Configuration
-   JWT_SECRET=your_super_secret_jwt_key_here
-   JWT_EXPIRES_IN=24h
-   ```
-
-4. **Set up the database**
-   ```bash
-   # Create PostgreSQL database
-   createdb trade_matching_engine
-
-   # Run migrations (if any)
-   npm run migration:run
-   ```
-
-5. **Start Redis server**
-   ```bash
-   redis-server
-   ```
-
-## 🚀 Running the Application
-
-### Development Mode
-```bash
-npm run start:dev
-```
-
-### Production Mode
-```bash
-npm run build
-npm run start:prod
-```
-
-### Local Development with Environment
-```bash
-npm run start:local
-```
-
-The application will be available at `http://localhost:3000`
-
-## 📚 API Documentation
-
-### Swagger UI
-Once the application is running, visit:
-- **Swagger UI**: `http://localhost:3000/api/docs`
-
-### API Endpoints
-
-#### Authentication
-- `POST /api/v1/auth/signup` - User registration
-- `POST /api/v1/auth/login` - User login
-- `POST /api/v1/auth/logout` - User logout
-
-#### User Management
-- `GET /api/v1/users/info` - Get current user information
-
-#### Orders
-- `POST /api/v1/orders` - Place a new order (buy/sell)
-- `GET /api/v1/orders/:id` - Get order details
-- `GET /api/v1/orders` - Get user's orders
-
-#### Orderbook
-- `GET /api/v1/orderbook/:side` - Get current orderbook (BUY or SELL)
-
-#### Trades
-- `GET /api/v1/trades` - Get trade history
-
-#### Health
-- `GET /api/v1/health` - System health check
-
-### Example API Usage
-
-#### 1. Register a new user
-```bash
-curl -X POST http://localhost:3000/api/v1/auth/signup \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "John Doe",
-    "email": "john@example.com",
-    "password": "password123"
-  }'
-```
-
-#### 2. Login
-```bash
-curl -X POST http://localhost:3000/api/v1/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{
-    "email": "john@example.com",
-    "password": "password123"
-  }'
-```
-
-#### 3. Place a buy order
-```bash
-curl -X POST http://localhost:3000/api/v1/orders \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
-  -d '{
-    "side": "BUY",
-    "price": 100.50,
-    "quantity": 10,
-    "validity_days": 30
-  }'
-```
-
-#### 4. Place a sell order
-```bash
-curl -X POST http://localhost:3000/api/v1/orders \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
-  -d '{
-    "side": "SELL",
-    "price": 99.75,
-    "quantity": 5,
-    "validity_days": 7
-  }'
-```
-
-#### 5. Get orderbook
-```bash
-curl -X GET "http://localhost:3000/api/v1/orderbook/BUY?page=1&limit=10" \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN"
-```
-
-#### 6. Get user information
-```bash
-curl -X GET "http://localhost:3000/api/v1/users/info" \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN"
-```
-
-#### 7. Get trade history
-```bash
-curl -X GET "http://localhost:3000/api/v1/trades?page=1&limit=10" \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN"
-```
-
-#### 8. Get system health
-```bash
-curl -X GET "http://localhost:3000/api/v1/health"
-```
-
-## 🔧 Development
-
-### Project Structure
-```
-src/
-├── common/                 # Shared utilities and decorators
-│   ├── decorators/        # Custom decorators
-│   ├── dtos/             # Common DTOs
-│   ├── enums/            # Enums
-│   ├── filters/          # Exception filters
-│   ├── guards/           # Authentication guards
-│   ├── helpers/          # Utility helpers
-│   ├── interceptors/     # Response interceptors
-│   └── interfaces/       # TypeScript interfaces
-├── configs/              # Configuration files
-├── database/             # Database configuration
-│   ├── postgres/         # PostgreSQL setup
-│   └── redis/            # Redis setup
-├── modules/              # Feature modules
-│   ├── auth/             # Authentication module
-│   ├── health/           # Health check module
-│   ├── orderbook/        # Trading engine module
-│   └── user/             # User management module
-├── providers/            # Infrastructure providers
-└── main.ts              # Application entry point
-```
-
-### Key Components
-
-
-#### Queue System
-- **BullMQ Integration**: Asynchronous order processing
-- **Retry Mechanisms**: Exponential backoff for failed jobs
-- **Job Persistence**: Jobs stored in Redis for reliability
-- **Monitoring**: Built-in job monitoring and metrics
- - **Queues**:
-   - `PROCESS_ORDER` → Matches incoming orders against the book
-   - `EXPIRE_ORDER` → Expires orders after `validity_days`
- - **Jobs**:
-   - `PROCESS_ORDER` and `EXPIRE_ORDER` job names map to queue-specific options
-
-### Database Schema
-
-#### Orders Table
-```sql
-CREATE TABLE orders (
-  id SERIAL PRIMARY KEY,
-  user_id INTEGER REFERENCES users(id) NOT NULL,
-  side VARCHAR(4) NOT NULL, -- 'BUY' or 'SELL'
-  price NUMERIC(18,8) NOT NULL,
-  quantity NUMERIC(18,8) NOT NULL,
-  remaining NUMERIC(18,8) NOT NULL,
-  status VARCHAR(10) DEFAULT 'OPEN', -- 'OPEN', 'PARTIAL', 'FILLED', 'EXPIRED'
-  validity_days INT DEFAULT 60,       -- order expiry window in days
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW()
-);
-```
-
-#### Trades Table
-```sql
-CREATE TABLE trades (
-  id SERIAL PRIMARY KEY,
-  buy_order_id INTEGER REFERENCES orders(id),
-  sell_order_id INTEGER REFERENCES orders(id),
-  price NUMERIC(18,8) NOT NULL,
-  quantity NUMERIC(18,8) NOT NULL,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-```
-
-#### Order Status History Table
-```sql
-CREATE TABLE order_status_history (
-  id SERIAL PRIMARY KEY,
-  order_id INTEGER REFERENCES orders(id) ON DELETE CASCADE,
-  status VARCHAR(10) NOT NULL,          -- mirrors OrderStatus
-  actor VARCHAR(10) NOT NULL,           -- 'USER' | 'SYSTEM'
-  created_at TIMESTAMP DEFAULT NOW()
-);
-```
-
-### Response Shapes (high-level)
-
-- Order (`GET /api/v1/orders/:id` and creation response):
-```json
-{
-  "id": 123,
-  "user_id": 45,
-  "side": "BUY",
-  "price": "100.50",
-  "quantity": "10.00",
-  "remaining": "5.00",
-  "status": "PARTIAL",
-  "validity_days": 30,
-  "created_at": "2025-01-01T12:34:56.000Z",
-  "updated_at": "2025-01-01T12:45:00.000Z",
-  "status_history": [
-    { "status": "OPEN", "actor": "USER", "created_at": "2025-01-01T12:34:56.000Z" },
-    { "status": "PARTIAL", "actor": "SYSTEM", "created_at": "2025-01-01T12:40:00.000Z" }
-  ]
-}
-```
-
-- Orderbook (`GET /api/v1/orderbook/:side`):
-```json
-{
-  "message": "Orderbook fetched successfully",
-  "data": {
-    "total": 25,
-    "page": 1,
-    "limit": 10,
-    "items": [
-      {
-        "price": "100.50",
-        "remaining": 15.75,
-        "status": "OPEN",
-        "user_name": "John Doe",
-        "created_at": "2024-01-15T10:30:00.000Z",
-        "side": "BUY"
-      }
-    ]
-  }
-}
-```
-
-- User Info (`GET /api/v1/users/info`):
-```json
-{
-  "message": "User Info fetched successfully",
-  "data": {
-    "id": 1,
-    "name": "John Doe",
-    "email": "john.doe@example.com",
-    "created_at": "2024-01-15T10:30:00.000Z",
-    "updated_at": "2024-01-15T10:30:00.000Z"
-  }
-}
-```
-
-## 🧪 Testing
-
-### Run Tests
-```bash
-# Unit tests
-npm run test
-
-# E2E tests
-npm run test:e2e
-
-# Test coverage
-npm run test:cov
-
-# Watch mode
-npm run test:watch
-```
-
-## 📊 Monitoring
-
-### Health Checks
-- **Health Endpoint**: `GET /api/v1/health`
-- **Database Status**: Checks PostgreSQL connection
-- **Redis Status**: Checks Redis connection
-- **Queue Status**: Checks BullMQ queue health
-
-### Logging
-The application includes comprehensive logging:
-- **Request/Response Logging**: All API calls logged
-- **Error Logging**: Detailed error information
-- **Trade Logging**: All trade executions logged
-- **Queue Logging**: Job processing status
-
-## 🔒 Security Features
-
-- **JWT Authentication**: Secure token-based authentication
-- **Password Hashing**: bcrypt with salt for password security
-- **Input Validation**: Comprehensive request validation
-- **CORS Protection**: Configurable CORS settings
-- **Helmet Security**: Security headers middleware
-
-- **Token Blacklisting**: Secure logout with token invalidation
-
-## 🚀 Deployment
-
-This project can be deployed like a standard NestJS app. Ensure Postgres and Redis are available and environment variables are configured. Containerization is optional and can be added per your infra requirements.
-
-
-
-## 🆘 Support
-
-For support and questions:
-- Create an issue in the repository
-- Check the API documentation at `/api/docs`
-- Review the logs for debugging information
-
-
+Spring Boot (Java 21) backend for a **price-time priority** order matching engine. Uses an **in-memory order book** for fast matching, **Kafka** for process-order and expire-order flows, and optional **batched DB writes** to control throughput.
 
 ---
 
-**Built with ❤️ using NestJS, PostgreSQL, and Redis**
+## Tech stack
 
+| Layer        | Technology                    |
+|-------------|-------------------------------|
+| Runtime     | Java 21                       |
+| Framework   | Spring Boot 3.4               |
+| Data        | Spring Data JPA, PostgreSQL   |
+| Cache       | Redis                         |
+| Messaging   | Apache Kafka                  |
+| Security    | Spring Security, JWT (jjwt)   |
+| API docs    | Springdoc OpenAPI (Swagger)   |
 
-## ✅ Why This Is A Good Solution To The Assignment
+---
 
-This implementation not only satisfies the requirements but demonstrates practical, production-minded trade-offs:
+## Features
 
-- **Meets all functional requirements**:
-  - Create buy/sell orders; store in Postgres
-  - Match trades with a clear, testable algorithm
-  - Fetch orderbook and trade history
-  - Robust error handling and request validation
+- **Auth:** Signup, login (JWT), logout (token blacklist in Redis). Request-scoped **AuthContext** for current user (no `@AuthenticationPrincipal` in every layer).
+- **Orders:** Place buy/sell orders; matching runs in memory against the order book (no DB pagination in the hot path).
+- **Orderbook:** Get active orders by side with pagination (reads from DB).
+- **Trades:** Trade history for the authenticated user.
+- **Audit:** Optional `created_by` / `updated_by` (signed-in user email) on entities that extend `BaseWithCreatedBy` / `BaseWithUpdatedBy`; filled by Spring Data JPA auditing from AuthContext.
+- **Health:** Actuator health endpoint.
+- **Kafka:** `process-order` and `expire-order` topics; matching and expiry consumers; hourly scheduler to enqueue expiry events.
 
-- **Simple yet realistic matching**:
-  - Price-time priority with partial fills and bounded batches
-  - Clear separation between read APIs and write/matching flows
+---
 
-- **Correct persistence model**:
-  - Normalized entities (`orders`, `trades`), status lifecycle with `order_status_history`
-  - Transactional writes ensure consistency under concurrency
+## Architecture
 
-- **Operationally sound**:
-  - Health checks (readiness/liveness analogs via health endpoints)
-  - Structured logging, global exception handling, input validation
-  - Swagger documentation for easy review and testing
+### In-memory order book
 
-- **Extensible by design**:
-  - Queues allow adding new processors (e.g., risk checks, alerts) without changing API
-  - `validity_days` and status history create hooks for future features (cancelations, audits)
-  - Modularity (helpers/services/controllers) keeps changes localized
+Matching is done against an **in-memory order book**, not the database, to avoid repeated queries and pagination.
 
-- **Security and DX**:
-  - JWT-based auth, bcrypt hashing, CORS, Helmet
-  - Example `.env`, clear scripts, tests and DTO schemas for frictionless onboarding
+- **Structure:** Two sides, each implemented as `TreeMap<BigDecimal, Deque<Order>>`:
+  - **BUY:** Descending price so the best bid is the highest price (first key).
+  - **SELL:** Ascending price so the best ask is the lowest price (first key).
+  - At each price level, orders are FIFO (`Deque`).
+- **Startup:** All OPEN/PARTIAL orders with `remaining > 0` are loaded from the DB into the book once at startup (`OrderBookConfig.loadBookOnStartup()`).
+- **After matching:** The book is updated in memory (add/remove orders). The DB is updated by the **write buffer** (see below). There is no periodic “sync” from DB back into the book; the book is the source of truth for matching, and the DB is the source of truth for **what we show to users** (APIs read from the DB).
 
-In short, it delivers a working, maintainable system that scales, is easy to reason about.
+### Matching engine
+
+- **`MatchingEngine.matchOrder(Order incoming)`:** Takes one incoming order and matches it against the **counter side** of the book until it is filled or there is no more matching liquidity. For each match it: pops the best counter order, computes trade size, updates both orders’ `remaining` and `status`, records the trade and status history, and puts partially filled counter orders back at the front of their price level (time priority).
+- **`MatchResult`:** Holds the updated incoming order, all modified orders, trades, and status logs. The write buffer persists these.
+
+### Kafka flow
+
+1. **Place order:** API saves the order to the DB, writes initial status history, and sends two Kafka messages: `process-order` (orderId) and `expire-order` (orderId).
+2. **Process order:** `OrderMatchingConsumer` receives `process-order`, calls `OrderMatchingService.matchOrder(orderId)`. The service gets the order (from the book if it was re-enqueued, else from DB), runs the matching engine inside `synchronized (orderBook)`, enqueues the result to the write buffer (and flushes immediately if batching is off), adds the incoming order back to the book if still partial, and returns. If the order is still partial, the consumer re-sends `process-order` (with a reprocess count; max 10).
+3. **Expire order:** `OrderExpiryConsumer` receives `expire-order` (after a delay), loads the order from DB, sets status to EXPIRED, and saves. Optionally the book should be updated (e.g. `orderBook.remove(orderId)`) so the in-memory book does not keep expired orders; currently that removal is not wired.
+
+### DB write throughput (batching)
+
+To avoid overloading the DB when match rate is high, persistence can be **batched**:
+
+- **Write buffer:** `MatchResultWriteBuffer` holds a queue of `MatchResult`s. Each match enqueues one result.
+- **When batching is disabled** (default): After each match, the service calls `writeBuffer.flush()` so every match is persisted immediately (one transaction per match).
+- **When batching is enabled** (`app.matching.persistence.batching-enabled=true`): The service only enqueues; a **scheduler** runs every `app.matching.persistence.flush-interval-ms` and calls `flush()`. The flush drains up to `app.matching.persistence.batch-size` results, **merges orders by id** (last update wins), and persists orders, trades, and status history in **one transaction**. So DB write rate is capped by the flush interval and batch size.
+
+Trade-off: with batching on, order/trade visibility in the DB (and thus in APIs) can lag by up to one flush interval.
+
+### Concurrency
+
+- Only **one thread** at a time runs the matching engine and updates the order book (`synchronized (orderBook)` in `OrderMatchingService.matchOrder`). This avoids double-spend and keeps the book consistent.
+- Kafka consumer threads can still run; they serialize on the book when calling `matchOrder`. No multithreading *inside* a single order’s match (that remains sequential).
+
+---
+
+## Order matching flow (step by step)
+
+1. **New order:** User places order via `POST /orders` → order saved to DB → `process-order` and `expire-order` sent to Kafka.
+2. **Consumer:** `OrderMatchingConsumer` receives `process-order` with `orderId`.
+3. **Load order:** `OrderMatchingService.matchOrder(orderId)` tries `orderBook.getAndRemove(orderId)` (for re-process); if null, loads order from DB.
+4. **Match:** Inside `synchronized (orderBook)`, `MatchingEngine.matchOrder(order)` runs: poll best counter order from the book, check price compatibility, compute trade size, update both orders, record trade and status logs, put back partial counter order; repeat until incoming is filled or no more liquidity.
+5. **Persist:** Match result is enqueued to `MatchResultWriteBuffer`. If batching is off, `flush()` runs now (one transaction). If batching is on, the scheduler flushes later (batched transaction).
+6. **Re-queue:** If the incoming order is still partial, it is added back to the book and the consumer sends `process-order` again (with incremented reprocess count).
+7. **User visibility:** All “my order” and “my trades” APIs read from the **database**. So the user sees the latest state after the next flush (immediate when batching is off, or within one flush interval when batching is on).
+
+---
+
+## Configuration
+
+### Application properties
+
+Copy `src/main/resources/application-properties.example` to `application-local.properties` (or your profile) and set:
+
+| Property | Description |
+|----------|-------------|
+| `server.port` | HTTP port (default 3000). |
+| `server.servlet.context-path` | API prefix (e.g. `/api/v1`). |
+| `spring.datasource.*` | PostgreSQL URL, username, password. |
+| `spring.data.redis.*` | Redis host, port, password. |
+| `spring.kafka.bootstrap-servers` | Kafka brokers. |
+| `jwt.secret` | Secret for signing JWTs. |
+| `jwt.expiration-ms` | Token TTL in milliseconds. |
+| `app.service-name` | Service name (e.g. for cache keys). |
+| `app.env` | Environment (e.g. development). |
+| `app.redis.ttl` | Default Redis TTL in seconds. |
+
+### Matching persistence (throughput control)
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `app.matching.persistence.batching-enabled` | `false` | If `true`, match results are buffered and flushed on a schedule instead of after every match. |
+| `app.matching.persistence.flush-interval-ms` | `200` | Interval (ms) between flushes when batching is enabled. |
+| `app.matching.persistence.batch-size` | `100` | Max number of match results to merge and persist in one transaction per flush. |
+
+Example (enable batching, flush every 200 ms, up to 100 results per flush):
+
+```properties
+app.matching.persistence.batching-enabled=true
+app.matching.persistence.flush-interval-ms=200
+app.matching.persistence.batch-size=100
+```
+
+---
+
+## Kafka topics
+
+| Topic | Producer | Consumer | Purpose |
+|-------|----------|----------|---------|
+| `process-order` | After placing an order; after partial fill (re-enqueue) | `OrderMatchingConsumer` | Trigger matching for an order. |
+| `expire-order` | After placing an order (delayed send) | `OrderExpiryConsumer` | Mark order as EXPIRED when TTL is reached. |
+
+Payload for both: `{ "orderId": <long>, "reprocessCount": <int> }` (reprocessCount only for process-order).
+
+---
+
+## Prerequisites
+
+- Java 21
+- Maven 3.9+
+- PostgreSQL 12+
+- Redis 6+
+- Kafka 3+
+
+---
+
+## Quick start
+
+1. **Clone and build**
+   ```bash
+   cd trade-matching-engine-java
+   mvn clean install
+   ```
+
+2. **Configure**
+   ```bash
+   cp src/main/resources/application-properties.example src/main/resources/application-local.properties
+   # Edit with your DB, Redis, Kafka, JWT values
+   ```
+
+3. **Run**
+   ```bash
+   mvn spring-boot:run -Dspring-boot.run.profiles=local
+   ```
+   API base: `http://localhost:3000/api/v1` (or your configured port).
+
+4. **API docs**
+   - Swagger UI: `http://localhost:3000/api/v1/swagger-ui.html`
+   - OpenAPI JSON: `http://localhost:3000/api/v1/v3/api-docs`
+
+---
+
+## API overview
+
+| Method | Path                 | Description        |
+|--------|----------------------|--------------------|
+| POST   | /auth/signup         | Register           |
+| POST   | /auth/login          | Login (JWT)        |
+| POST   | /auth/logout         | Logout (blacklist) |
+| GET    | /users/info          | Current user       |
+| POST   | /orders              | Place order        |
+| GET    | /orders/:id          | Order by ID        |
+| GET    | /orders              | My orders (paged)  |
+| GET    | /orderbook/:side     | Orderbook (BUY/SELL) |
+| GET    | /trades              | My trades (paged)  |
+| GET    | /health              | Health check       |
+
+All order/trade data returned by the API is read from the **database** (single source of truth for user-facing state).
+
+---
+
+## Project layout
+
+Base package: **`com.shahbazsideprojects.tradematching`**
+
+| Package / path | Description |
+|----------------|-------------|
+| **engine** | In-memory order book (`OrderBook`), matching engine (`MatchingEngine`), match result DTO (`MatchResult`), write buffer (`MatchResultWriteBuffer`), flush scheduler (when batching enabled), and config that loads the book at startup (`OrderBookConfig`). |
+| **advice** | Global response wrapper, exception handler. |
+| **config** | Security, JPA (incl. auditing), Redis, Kafka, OpenAPI. All config via `@ConfigurationProperties` (e.g. `AppProperties`, `JwtProperties`, `KafkaProperties`, `DataSourceProperties`). |
+| **controller** | REST controllers. |
+| **dto** | Request/response DTOs, pagination. |
+| **entity** | JPA entities and enums. Base hierarchy: `BaseEntity` (id, createdAt, updatedAt) → `BaseWithCreatedBy` (createdBy) → `BaseWithUpdatedBy` (updatedBy). Only entities that need audit extend the latter (e.g. `Order` extends `BaseWithUpdatedBy`). |
+| **exception** | Domain exceptions. |
+| **kafka** | Producer, payloads, consumers (matching, expiry). |
+| **repository** | Spring Data JPA repositories. |
+| **scheduler** | Order expiry scheduler (enqueues expire events). |
+| **security** | JWT filter, util, `UserPrincipal` (record: id, email, name), request-scoped **AuthContext**. |
+| **service** | Auth, User, Order, Trade, **OrderMatching** (uses engine + book + write buffer), Cache. |
+| **util** | Cache key builder. |
+
+---
+
+## Sync and visibility
+
+- **Book ↔ DB:** The in-memory book is loaded once at startup. After each match we persist via the write buffer (immediately or batched). We do **not** periodically reload the book from the DB. So the book is authoritative for matching; the DB is authoritative for what the API returns.
+- **User “my order” state:** Always from the DB (`GET /orders/:id`, `GET /orders`). After a match is flushed, the next request sees updated remaining/status and new trades.
+
+---
+
+## Scaling and large order counts
+
+- **Memory:** The book holds every OPEN/PARTIAL order. For very large numbers of orders, consider partitioning (e.g. one book per symbol) or lazy/partial loading at startup.
+- **Throughput:** Use **batched persistence** (`app.matching.persistence.batching-enabled=true`) to limit DB write rate and smooth load.
+- **Horizontal scaling:** With a single shared book, only one writer (one instance or one consumer group) should run matching. For multiple symbols, one book per symbol per instance avoids shared state and allows scaling out.
+
+---
+
+## License
+
+UNLICENSED.
