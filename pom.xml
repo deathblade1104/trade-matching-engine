@@ -11,7 +11,7 @@
         <relativePath/>
     </parent>
 
-    <groupId>com.shahbazsideprojects.tradematching</groupId>
+    <groupId>com.sideprojects.tradematching</groupId>
     <artifactId>trade-matching-engine</artifactId>
     <version>1.0.0-SNAPSHOT</version>
     <name>trade-matching-engine</name>
