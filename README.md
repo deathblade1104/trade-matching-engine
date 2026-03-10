@@ -188,7 +188,7 @@ All order/trade data returned by the API is read from the **database** (single s
 
 ## Project layout
 
-Base package: **`com.shahbazsideprojects.tradematching`**
+Base package: **`com.sideprojects.tradematching`**
 
 | Package / path | Description |
 |----------------|-------------|

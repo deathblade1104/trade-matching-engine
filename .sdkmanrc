@@ -1,0 +1,2 @@
+# Use with: sdk env (or sdk use when entering this directory with sdkman's auto-env)
+java=21.0.2-tem
